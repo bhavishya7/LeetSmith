@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "LeetSmith",
-  "version": "1.0.0",
-  "description": "An AI coach for LeetCode that teaches you — progressive hints, code review, and explanations, without handing over the full solution.",
+  "version": "1.0.1",
+  "description": "AI coaching for LeetCode: hints, code review, and explanations that teach you - without ever handing over the full solution.",
   "action": {
     "default_icon": {
       "16": "images/icon16.png",
