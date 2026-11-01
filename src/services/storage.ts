@@ -1,10 +1,13 @@
 import type { ProblemContext, ProgressState, UserSettings, UsageState } from '../types';
 import { DEFAULT_GUARDRAILS } from '../types';
+import { normalizeSort, type Sort } from '../components/progress-list-controls';
 
 export const STORAGE_KEYS = {
   PROBLEM_DATA: 'problemData',
   USER_SETTINGS: 'userSettings',
   USAGE_PREFIX: 'usage_',
+  /** The persisted "My Progress" list sort preference (quick-wins §4.6). */
+  PROGRESS_LIST_SORT: 'progress_list_sort',
   usageKey: (date: string) => `usage_${date}`,
   progressPrefix: (url: string) => `progress_${url}`,
 } as const;
@@ -114,6 +117,34 @@ export async function getSettings(): Promise<UserSettings> {
           });
         }
       }
+    });
+  });
+}
+
+/**
+ * The persisted "My Progress" list sort preference (quick-wins design §4.6):
+ * the sort FIELD + DIRECTION. Only the sort persists — search and difficulty/
+ * pattern filters stay transient. `normalizeSort` fails safe to the default
+ * ({recent, desc}) when the value is absent, the old bare-string format, or
+ * otherwise invalid, so an untouched install and a tampered value both behave
+ * like today (requirements R3.7).
+ */
+export async function getProgressListSort(): Promise<Sort> {
+  const key = STORAGE_KEYS.PROGRESS_LIST_SORT;
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(key, (result) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(normalizeSort(result[key]));
+    });
+  });
+}
+
+export async function saveProgressListSort(sort: Sort): Promise<void> {
+  const key = STORAGE_KEYS.PROGRESS_LIST_SORT;
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set({ [key]: sort }, () => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve();
     });
   });
 }
