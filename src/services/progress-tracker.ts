@@ -27,6 +27,22 @@ export async function loadProgress(problemUrl: string): Promise<ProgressState | 
   return getProgress(problemUrl);
 }
 
+/**
+ * Mark a report card as saved-to-progress in the PERSISTED session, so the
+ * "✓ Saved" state survives navigating away and back (the card is restored from
+ * contentHistory with its `savedToProgress` flag intact). No-op if the problem
+ * or card isn't found. See App.handleSaveToProgress.
+ */
+export async function markReportSaved(problemUrl: string, contentId: string): Promise<void> {
+  const progress = await getProgress(problemUrl);
+  if (!progress) return;
+  const card = progress.contentHistory.find(c => c.id === contentId);
+  if (!card) return;
+  card.metadata = { ...card.metadata, savedToProgress: true };
+  progress.lastUpdated = Date.now();
+  await saveProgress(problemUrl, progress);
+}
+
 export async function clearProgress(problemUrl: string): Promise<void> {
   await resetProgress(problemUrl);
 }

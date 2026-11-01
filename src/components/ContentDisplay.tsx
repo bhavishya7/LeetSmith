@@ -12,8 +12,6 @@ interface ContentDisplayProps {
   streamingId: string | null;
   /** Save a finished report card to persistent progress. Absent = not offered. */
   onSaveToProgress?: (item: LearningContent) => void;
-  /** ids of report cards already saved this session (to show a saved state). */
-  savedReportIds?: Set<string>;
   /**
    * E9: the agentic chat loop's current PROCESS step ("Reading your code",
    * "Answering") for the streaming card's thinking placeholder. Process-only
@@ -320,7 +318,7 @@ const ContentCard: React.FC<{
   );
 };
 
-const ContentDisplay: React.FC<ContentDisplayProps> = ({ content, isLoading, streamingId, onSaveToProgress, savedReportIds, agentStepLabel }) => {
+const ContentDisplay: React.FC<ContentDisplayProps> = ({ content, isLoading, streamingId, onSaveToProgress, agentStepLabel }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [content.length, streamingId]);
 
@@ -353,7 +351,7 @@ const ContentDisplay: React.FC<ContentDisplayProps> = ({ content, isLoading, str
             isStreaming={isStreaming}
             isGated={isGated}
             onSaveToProgress={onSaveToProgress}
-            isSaved={savedReportIds?.has(item.id)}
+            isSaved={item.metadata?.savedToProgress ?? false}
             stepLabel={isStreaming ? agentStepLabel : undefined}
           />
         );

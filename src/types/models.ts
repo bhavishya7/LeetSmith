@@ -68,6 +68,14 @@ export interface ContentMetadata {
    * model returned no/invalid data block (prose-only fallback).
    */
   structured?: StructuredData;
+  /**
+   * True once this report card has been saved to My Progress. Lives on the
+   * card's metadata (not ephemeral UI state) so the "✓ Saved" state PERSISTS
+   * with the session — when contentHistory is restored after navigating away,
+   * the saved state comes back with it instead of resetting. Only meaningful on
+   * GENERATE_REPORT cards.
+   */
+  savedToProgress?: boolean;
 }
 
 /**

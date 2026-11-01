@@ -5,7 +5,7 @@ import SettingsModal from '../components/SettingsModal';
 import ProgressView from '../components/ProgressView';
 import { StuckTimer } from '../services/stuck-timer';
 import type { ProblemContext, ProgressState, LearningContent, ActionType, UserSettings, StuckSuggestion } from '../types';
-import { loadProgress, trackAction, appendContent, clearProgress } from '../services/progress-tracker';
+import { loadProgress, trackAction, appendContent, clearProgress, markReportSaved } from '../services/progress-tracker';
 import { getSettings, saveSettings } from '../services/storage';
 import { streamLLMRequest, sendToolRound, buildChatData, regenerateWithoutSolution } from '../services/llm-service';
 import { filterResponse, isSolutionExemptAction } from '../services/solution-filter';
@@ -86,7 +86,6 @@ const App: React.FC = () => {
   // here" blinking caret only shows while the field is empty AND unfocused
   // (the real text caret takes over on focus — never two carets at once).
   const [chatFocused, setChatFocused] = useState(false);
-  const [savedReportIds, setSavedReportIds] = useState<Set<string>>(new Set());
   // Chat intent routing: a pending confirm affordance (exempt guardrail OR the
   // borderline `ask` outcome). `query` is the original message so "Just answer"
   // can fall through to chat with it. See .kiro/specs/leetsage-chat-intent-routing.
@@ -659,7 +658,14 @@ const App: React.FC = () => {
         attempt: projection.attempt,
         notes: item.content,
       });
-      setSavedReportIds(prev => new Set(prev).add(item.id));
+      // Persist the saved flag onto the card in the stored session so the
+      // "✓ Saved" state survives navigating away + back (the card is restored
+      // from contentHistory with this flag). Also update in-memory content so
+      // the button flips to "Saved" immediately this render.
+      await markReportSaved(problemContext.url, item.id);
+      setLearningContent(prev => prev.map(c =>
+        c.id === item.id ? { ...c, metadata: { ...c.metadata, savedToProgress: true } } : c,
+      ));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save to My Progress');
     }
@@ -822,7 +828,7 @@ const App: React.FC = () => {
       )}
 
       {/* Conversation / content stream */}
-      <ContentDisplay content={learningContent} isLoading={isLoading} streamingId={streamingId} onSaveToProgress={handleSaveToProgress} savedReportIds={savedReportIds} agentStepLabel={agentStepLabel ?? undefined} />
+      <ContentDisplay content={learningContent} isLoading={isLoading} streamingId={streamingId} onSaveToProgress={handleSaveToProgress} agentStepLabel={agentStepLabel ?? undefined} />
 
       {/* Errors + stuck suggestion */}
       {error && (
