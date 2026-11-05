@@ -110,9 +110,22 @@ export async function getAllRecords(): Promise<ProblemRecord[]> {
  */
 export function migrate(record: ProblemRecord): ProblemRecord {
   let r = record;
-  // (No migrations yet — v1 is the first shape. When ProblemRecord changes,
-  // add: `if (r.schemaVersion < 2) r = { ...r, newField: default, schemaVersion: 2 };`)
   if (r.schemaVersion == null) r = { ...r, schemaVersion: 1 };
+  // v1 → v2 (leetsage-progress-insights-overhaul): two new per-Attempt fields.
+  // Default an old attempt's usedActions to [] (⇒ no tool-depth ⇒ never scored
+  // as struggle) and leave optimalComplexity ABSENT (⇒ the achieved-vs-optimal
+  // flag can't fire ⇒ never a false "suboptimal"). This defaulting rule is the
+  // SAME one the import sanitizer applies (progress-io.ts sanitizeAttempt), so
+  // an old stored record and an old imported file end up identical — pinned by
+  // a convergence test. See models.ts PROBLEM_RECORD_SCHEMA_VERSION (the
+  // three-touch-point rule).
+  if (r.schemaVersion < 2) {
+    r = {
+      ...r,
+      attempts: r.attempts.map(a => (a.usedActions ? a : { ...a, usedActions: [] })),
+      schemaVersion: 2,
+    };
+  }
   return r;
 }
 

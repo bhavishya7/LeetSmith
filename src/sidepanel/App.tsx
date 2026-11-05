@@ -648,7 +648,18 @@ const App: React.FC = () => {
         const extracted = await extractCurrentCode(tabId);
         if (extracted.status === 'ok') language = extracted.language;
       }
-      const projection = buildRecordProjection(facts, reportData, item.content, language);
+      // v2 (progress-insights-overhaul): project two new client-side signals onto
+      // the attempt — (1) the coaching actions used this session (live Set, no new
+      // model output), and (2) the canonical optimal from the B10 pin (reused, NOT
+      // re-judged). Storing the pin value ON the attempt is what lets the
+      // achieved-vs-optimal flag round-trip through export/import (the pin store
+      // itself isn't exported). See design §0.2 / §4.1 / §5.2.
+      const usedActions = Array.from(progress?.usedActions ?? new Set<ActionType>());
+      const pinnedOptimal = (await getComplexityPin(slugFromUrl(problemContext.url)))?.optimal ?? null;
+      // Free-form chat questions this session (same isUserQuery count the report
+      // digest uses) — a soft struggle signal projected onto the attempt.
+      const chatCount = learningContentRef.current.filter(c => c.metadata?.isUserQuery).length;
+      const projection = buildRecordProjection(facts, reportData, item.content, language, usedActions, pinnedOptimal, chatCount);
       await saveAttempt({
         slug: slugFromUrl(problemContext.url),
         url: problemContext.url,
