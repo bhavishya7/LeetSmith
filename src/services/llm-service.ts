@@ -319,28 +319,81 @@ export async function* streamLLMRequest(request: LLMRequest): AsyncGenerator<str
     const response = await fetchWithRetry(`${GEMINI_BASE_URL}/chat/completions`, init, STREAM_MAX_RETRIES);
     const reader = response.body?.getReader();
     if (!reader) throw new Error('No response body');
+
+    // B29: remember the terminal finish_reason so a token-cap cutoff
+    // (`'length'`) can surface an honest "cut off" signal instead of looking
+    // like a clean finish. Mirrors what the non-streaming paths already read.
+    let finishReason: LLMResponse['finishReason'] | undefined;
+
+    // B28: buffered SSE reader. The network delivers bytes on ARBITRARY
+    // boundaries, so a `data: {json}` SSE line is frequently split across two
+    // reads. The old loop decoded+split FRESH each read with no buffer, so a
+    // split line failed JSON.parse and was silently dropped by the catch —
+    // permanently losing that content while the loop returned normally (a
+    // truncated card, no error). We now keep a `buffer` string across reads,
+    // process only COMPLETE lines, and RETAIN the trailing partial line for the
+    // next read; `{ stream: true }` also fixes a multi-byte UTF-8 char split
+    // across reads. `handleLine` is the SINGLE per-line code path shared by the
+    // loop and the final flush so they can't diverge; it returns true when a
+    // `[DONE]` sentinel is seen so the caller can stop.
     const decoder = new TextDecoder();
-    while (true) {
+    let buffer = '';
+
+    const handleLine = (line: string): { done: boolean; chunk?: string } => {
+      if (!line.startsWith('data: ')) return { done: false };
+      const data = line.slice(6).trim();
+      if (data === '[DONE]') return { done: true };
+      try {
+        const parsed = JSON.parse(data);
+        // B29: capture a terminal finish_reason when present (the final content
+        // frame carries it; the usage-only frame does not). Last non-null wins.
+        const fr = parsed.choices?.[0]?.finish_reason;
+        if (fr) finishReason = fr;
+        // The usage-only chunk carries no content; surface it once via the
+        // optional callback. Guarded (untrusted external boundary).
+        const u = parsed.usage;
+        if (u && typeof u.prompt_tokens === 'number' && typeof u.completion_tokens === 'number') {
+          request.onUsage?.({ promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens });
+        }
+        const chunk = parsed.choices?.[0]?.delta?.content;
+        if (chunk) return { done: false, chunk };
+      } catch { /* genuinely malformed frame — now a true last resort, not a split line */ }
+      return { done: false };
+    };
+
+    let sawDone = false;
+    while (!sawDone) {
       const { done, value } = await reader.read();
       if (done) break;
-      const lines = decoder.decode(value).split('\n');
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      // RETAIN the trailing partial line (may be an incomplete `data: {…}`).
+      buffer = lines.pop() ?? '';
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') return;
-        try {
-          const parsed = JSON.parse(data);
-          const chunk = parsed.choices?.[0]?.delta?.content;
-          if (chunk) yield chunk;
-          // The usage-only chunk carries no content; surface it once via the
-          // optional callback. Guarded (untrusted external boundary).
-          const u = parsed.usage;
-          if (u && typeof u.prompt_tokens === 'number' && typeof u.completion_tokens === 'number') {
-            request.onUsage?.({ promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens });
-          }
-        } catch { /* skip malformed chunk */ }
+        const r = handleLine(line);
+        if (r.chunk) yield r.chunk;
+        if (r.done) { sawDone = true; break; }
       }
     }
+
+    // FLUSH: the stream ended (or [DONE] arrived). decoder.decode() with no args
+    // flushes any pending multi-byte char; then process whatever COMPLETE line
+    // remains in the buffer so its content (or a trailing [DONE]/finish_reason)
+    // isn't lost — closing B28's dropped-final-chunk case.
+    if (!sawDone) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        const r = handleLine(buffer);
+        if (r.chunk) yield r.chunk;
+      }
+    }
+
+    // B29: if the stream ended because the model hit the token cap, tell the
+    // caller so it can show an honest "response was cut off" cue instead of
+    // presenting a truncated answer as complete. A clean 'stop' (or no signal)
+    // does NOT fire this.
+    if (finishReason === 'length') request.onFinish?.('length');
+    else if (finishReason) request.onFinish?.(finishReason);
   } catch (err) {
     // Normalize low-level failures into friendly, user-facing messages. An
     // APIError (from buildAPIError) is already friendly — rethrow as-is. An

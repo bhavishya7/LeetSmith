@@ -46,6 +46,19 @@ export interface LLMRequest {
    */
   onUsage?: (usage: { promptTokens: number; completionTokens: number }) => void;
   /**
+   * B29: optional callback invoked once on the STREAMING path with the terminal
+   * `finish_reason` when the stream ends, if the endpoint surfaces one. The
+   * streaming loop otherwise only ever saw `delta.content`, so a token-cap
+   * cutoff (`finish_reason: 'length'`, default maxTokens=800) was
+   * indistinguishable from a clean `'stop'` finish and a truncated answer was
+   * shown as complete. Callers use this to surface an honest "response was cut
+   * off (token limit)" cue. Best-effort — may never fire if the endpoint omits
+   * finish_reason; callers must treat a missing signal as a clean finish. This
+   * mirrors the non-streaming paths, which already read finish_reason directly.
+   * Ignored when omitted.
+   */
+  onFinish?: (reason: LLMResponse['finishReason']) => void;
+  /**
    * Chat Enhancement (E9): optional override of the full OpenAI message array.
    * When set, the service sends these messages verbatim instead of building them
    * from problemContext/actionType — used by the agentic chat loop's streamed

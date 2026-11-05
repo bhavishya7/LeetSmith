@@ -407,12 +407,17 @@ const App: React.FC = () => {
       // stream surfaces it. Recorded best-effort after the stream (see below).
       const startedAt = performance.now();
       let capturedUsage: { promptTokens: number; completionTokens: number } | undefined;
+      // B29: the stream sets this when it ended on a token-cap cutoff
+      // (finish_reason 'length') so we can append an honest "cut off" cue to the
+      // finalized card instead of presenting a truncated answer as complete.
+      let wasCutOff = false;
       for await (const chunk of streamLLMRequest({
         problemContext, actionType, systemPrompt: '', userMessage: '',
         apiKey: settings.apiConfig.apiKey, model: settings.apiConfig.model,
         maxTokens: settings.guardrails.maxTokens, timeoutMs: settings.guardrails.requestTimeoutMs,
         previousHintLevel: progress?.hintLevel ?? 0, userApproach, userCode, codeLanguage, sessionDigest, pinnedOptimal,
         onUsage: (u) => { capturedUsage = u; },
+        onFinish: (reason) => { if (reason === 'length') wasCutOff = true; },
       })) {
         fullContent += chunk;
         // Only exempt actions paint tokens as they arrive. For exempt structured
@@ -442,7 +447,10 @@ const App: React.FC = () => {
       const filteredContent = await recoverFilteredResponse(prose, actionType, { userApproach, userCode, codeLanguage });
       const finalContent: LearningContent = {
         ...newContent,
-        content: filteredContent,
+        // B29: a subtle, honest cue when the model hit the token cap mid-thought.
+        // The partial content is still useful, so this is a soft note (not an
+        // error) appended after the (filtered) prose.
+        content: wasCutOff ? `${filteredContent}\n\n_⚠️ This response was cut off (token limit) — ask a follow-up for the rest._` : filteredContent,
         metadata: data
           ? { ...(newContent.metadata ?? {}), structured: data }
           : newContent.metadata,
@@ -557,6 +565,9 @@ const App: React.FC = () => {
       const toolContext: ToolContext = { problemContext, getTabId: getActiveLeetCodeTabId };
       const startedAt = performance.now();
       let finalUsage: { promptTokens: number; completionTokens: number } | undefined;
+      // B29: set when the final streamed answer hit the token cap, so we append
+      // the same honest "cut off" cue as the action path.
+      let wasCutOff = false;
 
       const result = await runChatAgent(initialMessages, {
         runToolRound: (messages) => sendToolRound({
@@ -574,6 +585,7 @@ const App: React.FC = () => {
             // the terminal answer can't re-request tools (the loop is bounded).
             messages, toolChoice: 'none',
             onUsage: (u) => { finalUsage = u; },
+            onFinish: (reason) => { if (reason === 'length') wasCutOff = true; },
           })) {
             // B1: non-exempt chat withholds tokens mid-stream; we accumulate and
             // reveal once after the filter below. Same as the shipped behavior.
@@ -605,7 +617,7 @@ const App: React.FC = () => {
       // redact-and-recover (one bounded regenerate in the would-be-blank case)
       // via the SAME shared helper the action path uses.
       const filteredContent = await recoverFilteredResponse(result.answer, 'EXPLAIN_CONCEPT', { userQuery: q, userCode, codeLanguage });
-      const finalResp = { ...respMsg, content: filteredContent };
+      const finalResp = { ...respMsg, content: wasCutOff ? `${filteredContent}\n\n_⚠️ This response was cut off (token limit) — ask a follow-up for the rest._` : filteredContent };
       setLearningContent(prev => prev.map(c => c.id === respId ? finalResp : c));
       await appendContent(problemContext.url, userMsg);
       await appendContent(problemContext.url, finalResp);
