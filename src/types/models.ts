@@ -197,8 +197,28 @@ export type StructuredData = AnalyzeData | UnderstandData | ReportData | Complex
 // `ContentMetadata.structured` with no translation layer and one vocabulary.
 // ---------------------------------------------------------------------------
 
-/** Bump when ProblemRecord's shape changes; drives migrate() (design §6). */
-export const PROBLEM_RECORD_SCHEMA_VERSION = 1;
+/**
+ * Bump when ProblemRecord's shape changes; drives migrate() (design §6).
+ *
+ * v2 (leetsage-progress-insights-overhaul) added three per-Attempt fields:
+ * `usedActions`, `optimalComplexity`, and `chatCount`.
+ *
+ * ⚠️ THE THREE-TOUCH-POINT RULE for any NEW persisted record/attempt field —
+ * a field has THREE mandatory homes, not one. Miss any one and the field is
+ * silently wrong on a round-trip:
+ *   1. CAPTURE / PROJECTION — where the value is written at save time
+ *      (`buildRecordProjection` in session-digest.ts, fed from
+ *      App.tsx handleSaveToProgress).
+ *   2. STORAGE-READ MIGRATION — `migrate()` in progress-records.ts, so an older
+ *      stored record reads cleanly with a safe default.
+ *   3. IMPORT SANITIZER — `sanitizeAttempt`/`sanitizeRecord` in progress-io.ts.
+ *      The importer is an ALLOWLIST ("reconstruct, don't validate-in-place"):
+ *      it copies ONLY explicitly-known fields, so a new field NOT added here is
+ *      silently DROPPED on import (bug-class B20). (2) and (3) MUST share one
+ *      defaulting rule so an old stored record and an old imported file end up
+ *      identical.
+ */
+export const PROBLEM_RECORD_SCHEMA_VERSION = 2;
 
 export type AttemptOutcome = 'solved' | 'attempted' | 'gave-up';
 
@@ -216,6 +236,32 @@ export interface Attempt {
   complexity: Complexity;       // the attempt's achieved time/space
   hintsUsed: number;            // from ProgressState.hintLevel
   language?: string;            // editor language, if known
+  /**
+   * v2 — the coaching actions the user reached for this session (projected from
+   * the live ProgressState.usedActions Set at save time; a Set isn't
+   * JSON-serializable so we store an array). A SOFT struggle-heuristic input to
+   * analytics only — never shown to the user (design §5.4). Absent/[] on older
+   * records ⇒ "none recorded", never treated as struggle (migration default).
+   */
+  usedActions?: ActionType[];
+  /**
+   * v2 — the canonical optimal complexity for this problem at save time,
+   * projected from the B10 complexity pin (NOT a fresh model judgment). Stored
+   * ON the record (not read from the separate, un-exported pin store) so the
+   * achieved-vs-optimal "may be suboptimal" flag is a pure function of EXPORTED
+   * data and round-trips (design §0.2 / §4.1 / R7b). Absent ⇒ no pin existed ⇒
+   * the problem is never flagged (absence is not a claim of optimality — R3.4).
+   */
+  optimalComplexity?: Complexity;
+  /**
+   * v2 — how many free-form chat questions the user asked this session (the
+   * same `isUserQuery` count the report digest uses). A struggle-heuristic
+   * input only (never shown): more questions on a problem is a weak "this was
+   * harder" signal. Absent/0 on older records ⇒ never treated as struggle
+   * (migration default). Bounded when scored so a chatty-but-curious user isn't
+   * over-weighted (design §5.3).
+   */
+  chatCount?: number;
 }
 
 /** A stable, versioned record of one problem the user has worked on. */

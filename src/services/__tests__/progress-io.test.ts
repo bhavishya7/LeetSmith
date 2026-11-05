@@ -5,12 +5,16 @@ import {
   serializeProgressExport,
   parseImport,
   sanitizeRecord,
+  sanitizeUsedActions,
+  sanitizeComplexity,
   mergeRecords,
   EXPORT_FORMAT_ID,
   EXPORT_FORMAT_VERSION,
   MAX_IMPORT_BYTES,
   MAX_RECORDS,
 } from '../progress-io';
+import { migrate } from '../progress-records';
+import { computeInsights } from '../progress-analytics';
 import { PROBLEM_RECORD_SCHEMA_VERSION } from '../../types';
 import type { ProblemRecord, Attempt } from '../../types';
 
@@ -467,6 +471,161 @@ describe('security — hardening follow-ups (#1 non-JSON, #2 global attempts, #5
   it('#5 keeps a legitimate LeetCode problem url (incl. sub-paths)', () => {
     const sane = sanitizeRecord({ ...record(), slug: 'two-sum', url: 'https://leetcode.com/problems/two-sum/description/' });
     expect(sane!.url).toBe('https://leetcode.com/problems/two-sum/description/');
+  });
+});
+
+// ===========================================================================
+// v2 (progress-insights-overhaul) — R4b: usedActions + optimalComplexity MUST
+// round-trip; the import sanitizer is the easy-to-miss third touch-point.
+// ===========================================================================
+
+describe('v2 — sanitizeUsedActions (untrusted allowlist, R4b.3)', () => {
+  it('keeps only known ActionType strings, dedupes, defaults [] for garbage', () => {
+    expect(sanitizeUsedActions(['GET_HINT', 'CHECK_APPROACH', 'GET_HINT'])).toEqual(['GET_HINT', 'CHECK_APPROACH']);
+    expect(sanitizeUsedActions(['GET_HINT', 'NOT_A_REAL_ACTION', 42, null, {}])).toEqual(['GET_HINT']);
+    expect(sanitizeUsedActions('GET_HINT')).toEqual([]);   // not an array
+    expect(sanitizeUsedActions(undefined)).toEqual([]);
+    expect(sanitizeUsedActions(null)).toEqual([]);
+    expect(sanitizeUsedActions({ 0: 'GET_HINT' })).toEqual([]); // object, not array
+  });
+
+  it('cannot exceed the vocabulary size even with a flood of duplicates', () => {
+    const flood = new Array(1000).fill('GET_HINT');
+    expect(sanitizeUsedActions(flood)).toEqual(['GET_HINT']);
+  });
+});
+
+describe('v2 — sanitizeComplexity (absent ⇒ null, never fabricate)', () => {
+  it('returns a clean pair when both fields are present', () => {
+    expect(sanitizeComplexity({ time: 'O(n)', space: 'O(1)' })).toEqual({ time: 'O(n)', space: 'O(1)' });
+  });
+  it('returns null for a missing/half/garbage value (so the flag never fires on it)', () => {
+    expect(sanitizeComplexity(undefined)).toBeNull();
+    expect(sanitizeComplexity(null)).toBeNull();
+    expect(sanitizeComplexity({ time: 'O(n)' })).toBeNull();
+    expect(sanitizeComplexity({ time: '', space: '' })).toBeNull();
+    expect(sanitizeComplexity('O(n)')).toBeNull();
+  });
+});
+
+describe('v2 — R4b round-trip of the new Attempt fields', () => {
+  const withV2 = record({
+    slug: 'course-schedule',
+    title: 'Course Schedule',
+    attempts: [attempt({
+      usedActions: ['GET_HINT', 'CHECK_APPROACH', 'UNDERSTAND_SOLUTION'],
+      optimalComplexity: { time: 'O(V+E)', space: 'O(V+E)' },
+      chatCount: 3,
+      complexity: { time: 'O(n^2)', space: 'O(1)' },
+    })],
+  });
+
+  it('(a) a record WITH the new fields round-trips with them intact', () => {
+    const { records, error, skipped } = parseImport(serializeProgressExport([withV2]));
+    expect(error).toBeUndefined();
+    expect(skipped).toBe(0);
+    const a = records[0].attempts[0];
+    expect(a.usedActions).toEqual(['GET_HINT', 'CHECK_APPROACH', 'UNDERSTAND_SOLUTION']);
+    expect(a.optimalComplexity).toEqual({ time: 'O(V+E)', space: 'O(V+E)' });
+    expect(a.chatCount).toBe(3);
+  });
+
+  it('(b) an OLD export WITHOUT the fields imports cleanly with safe defaults', () => {
+    // Model a pre-v2 file: build the JSON then delete the fields from the attempt.
+    const old = buildProgressExport([record({ slug: 'old-problem' })]);
+    delete (old.records[0].attempts[0] as Partial<Attempt>).usedActions;
+    delete (old.records[0].attempts[0] as Partial<Attempt>).optimalComplexity;
+    delete (old.records[0].attempts[0] as Partial<Attempt>).chatCount;
+    const { records, error } = parseImport(JSON.stringify(old));
+    expect(error).toBeUndefined();
+    const a = records[0].attempts[0];
+    expect(a.usedActions).toEqual([]);                 // defaulted, not undefined
+    expect('optimalComplexity' in a).toBe(false);      // absent ⇒ never flagged
+    expect('chatCount' in a).toBe(false);              // absent ⇒ scored as 0
+  });
+
+  it('(c) export→import→export→import is idempotent WITH the new fields', () => {
+    const first = parseImport(serializeProgressExport([withV2])).records;
+    const second = parseImport(serializeProgressExport(first, 0)).records;
+    expect(second).toEqual(first);
+  });
+
+  it('sanitizes an untrusted usedActions array on import (allowlist, not pass-through)', () => {
+    const hostile = buildProgressExport([record({ slug: 'two-sum' })]);
+    (hostile.records[0].attempts[0] as { usedActions: unknown }).usedActions =
+      ['GET_HINT', '<script>', 'DROP TABLE', 7];
+    const { records } = parseImport(JSON.stringify(hostile));
+    expect(records[0].attempts[0].usedActions).toEqual(['GET_HINT']);
+  });
+});
+
+describe('v2 — R4b.4 convergence: storage-read default === import default', () => {
+  it('an old field-less attempt ends up IDENTICAL through migrate() and through the importer', () => {
+    // The same old (v1, field-less) attempt, fed to both paths.
+    const oldAttempt: Attempt = attempt({ slug: undefined } as Partial<Attempt>);
+    delete (oldAttempt as Partial<Attempt>).usedActions;
+    delete (oldAttempt as Partial<Attempt>).optimalComplexity;
+
+    // Path (2): storage-read migration of a v1 record.
+    const viaMigrate = migrate({
+      ...record({ schemaVersion: 1 }), attempts: [{ ...oldAttempt }],
+    } as unknown as ProblemRecord).attempts[0];
+
+    // Path (3): import sanitizer of the same old attempt.
+    const old = buildProgressExport([{ ...record(), attempts: [{ ...oldAttempt }] }]);
+    delete (old.records[0].attempts[0] as Partial<Attempt>).usedActions;
+    delete (old.records[0].attempts[0] as Partial<Attempt>).optimalComplexity;
+    const viaImport = parseImport(JSON.stringify(old)).records[0].attempts[0];
+
+    // Both paths must agree on the new fields (the "cannot diverge" guarantee).
+    expect(viaMigrate.usedActions).toEqual(viaImport.usedActions);
+    expect(viaMigrate.usedActions).toEqual([]);
+    expect('optimalComplexity' in viaMigrate).toBe('optimalComplexity' in viaImport);
+    expect('optimalComplexity' in viaMigrate).toBe(false);
+  });
+});
+
+describe('v2 — R7b.3 acceptance: insights survive export → import into empty storage', () => {
+  it('pure-function insights match after a round-trip (only wall-clock framing may shift)', () => {
+    // A set rich enough to exercise trend + weakest/strongest + a flag + dashboard.
+    const base = 1_760_000_000_000; // a fixed epoch in 2025, well within sane range
+    const DAY = 24 * 60 * 60 * 1000;
+    const mk = (i: number, pattern: ProblemRecord['patterns'][number], difficulty: ProblemRecord['difficulty'], hints: number, achieved: Attempt['complexity'], optimal?: Attempt['complexity']) =>
+      record({
+        slug: `prob-${i}`, title: `Problem ${i}`, difficulty, patterns: [pattern],
+        firstSolvedAt: base - (20 - i) * DAY, lastUpdatedAt: base - (20 - i) * DAY, bestAttemptIndex: 0,
+        attempts: [attempt({
+          date: base - (20 - i) * DAY, outcome: 'solved', hintsUsed: hints, complexity: achieved,
+          usedActions: ['CHECK_APPROACH'],
+          ...(optimal ? { optimalComplexity: optimal } : {}),
+        })],
+      });
+    const records = [
+      mk(1, 'Dynamic Programming', 'Hard', 3, { time: 'O(n^2)', space: 'O(1)' }, { time: 'O(n)', space: 'O(n)' }),
+      mk(2, 'Dynamic Programming', 'Hard', 3, { time: 'O(n)', space: 'O(n)' }),
+      mk(3, 'Dynamic Programming', 'Medium', 2, { time: 'O(n)', space: 'O(n)' }),
+      mk(4, 'Hash Map', 'Easy', 0, { time: 'O(n)', space: 'O(n)' }, { time: 'O(n)', space: 'O(n)' }),
+      mk(5, 'Hash Map', 'Easy', 0, { time: 'O(n)', space: 'O(n)' }),
+      mk(6, 'Hash Map', 'Easy', 0, { time: 'O(n)', space: 'O(n)' }),
+    ];
+
+    const before = computeInsights(records);
+    // Export → import into EMPTY storage (merge against []).
+    const imported = parseImport(serializeProgressExport(records)).records;
+    const { merged } = mergeRecords([], imported);
+    const after = computeInsights(merged);
+
+    // Every PURE-function insight matches (trend is order-relative; flags/ranking
+    // are pure over stored fields which round-trip via R4b).
+    expect(after.trend.direction).toBe(before.trend.direction);
+    expect(after.weakestLink?.pattern).toBe(before.weakestLink?.pattern);
+    expect(after.strongestLink?.pattern).toBe(before.strongestLink?.pattern);
+    expect(after.efficiencyFlags.map(f => f.slug)).toEqual(before.efficiencyFlags.map(f => f.slug));
+    expect(after.dashboard.byDifficulty).toEqual(before.dashboard.byDifficulty);
+    expect(after.dashboard.patternCoverage).toBe(before.dashboard.patternCoverage);
+    expect(after.dashboard.reviewedCandidates).toBe(before.dashboard.reviewedCandidates);
+    // Sanity: the flag actually fired (prob-1 O(n^2) vs O(n)), so this isn't vacuous.
+    expect(before.efficiencyFlags.map(f => f.slug)).toContain('prob-1');
   });
 });
 

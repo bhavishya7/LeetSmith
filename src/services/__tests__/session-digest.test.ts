@@ -283,4 +283,54 @@ describe('buildRecordProjection — report is authoritative', () => {
     const proj = buildRecordProjection(facts, reportData(), '# My Report\nnotes');
     expect(proj.attempt.solutionSummary).toBe('# My Report\nnotes');
   });
+
+  // v2 (progress-insights-overhaul) — the two new projected fields.
+  describe('v2 — usedActions + optimalComplexity projection', () => {
+    it('defaults usedActions to [] when the arg is omitted (never undefined)', () => {
+      const proj = buildRecordProjection(extractSessionFacts([], null), reportData(), '# R');
+      expect(proj.attempt.usedActions).toEqual([]);
+    });
+
+    it('projects + dedupes the usedActions array onto the attempt', () => {
+      const proj = buildRecordProjection(
+        extractSessionFacts([], null), reportData(), '# R', 'python',
+        ['GET_HINT', 'CHECK_APPROACH', 'GET_HINT'],
+      );
+      expect(proj.attempt.usedActions).toEqual(['GET_HINT', 'CHECK_APPROACH']);
+    });
+
+    it('attaches optimalComplexity when a pinned optimal is provided', () => {
+      const proj = buildRecordProjection(
+        extractSessionFacts([], null), reportData(), '# R', undefined,
+        [], { time: 'O(n)', space: 'O(1)' },
+      );
+      expect(proj.attempt.optimalComplexity).toEqual({ time: 'O(n)', space: 'O(1)' });
+    });
+
+    it('OMITS optimalComplexity when the pinned optimal is null (never fabricates O(?))', () => {
+      const proj = buildRecordProjection(
+        extractSessionFacts([], null), reportData(), '# R', undefined, [], null,
+      );
+      expect('optimalComplexity' in proj.attempt).toBe(false);
+    });
+
+    it('OMITS optimalComplexity when the pin is a half-empty pair', () => {
+      const proj = buildRecordProjection(
+        extractSessionFacts([], null), reportData(), '# R', undefined, [],
+        { time: 'O(n)', space: '' },
+      );
+      expect('optimalComplexity' in proj.attempt).toBe(false);
+    });
+
+    it('projects a positive chatCount; omits it when zero (old-record parity)', () => {
+      const withChat = buildRecordProjection(
+        extractSessionFacts([], null), reportData(), '# R', undefined, [], null, 3,
+      );
+      expect(withChat.attempt.chatCount).toBe(3);
+      const noChat = buildRecordProjection(
+        extractSessionFacts([], null), reportData(), '# R', undefined, [], null, 0,
+      );
+      expect('chatCount' in noChat.attempt).toBe(false);
+    });
+  });
 });

@@ -72,9 +72,12 @@ const LeetCodeLink: React.FC<{ url: string | undefined; title: string; className
       onKeyDown={(e) => e.stopPropagation()}
       title="Open on LeetCode"
       aria-label={`Open ${title} on LeetCode`}
-      className={`inline-flex items-center text-neutral-400 hover:text-blue-500 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 rounded ${className ?? ''}`}
+      className={`inline text-neutral-400 hover:text-blue-500 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 rounded ${className ?? ''}`}
     >
-      <ExternalLinkIcon size={iconSize} />
+      {/* `inline` anchor + the icon aligned to the text's optical middle via a
+          small em-based baseline nudge — robust whether the title is one line or
+          wraps (an inline-flex box sat slightly below the text baseline). */}
+      <ExternalLinkIcon size={iconSize} className="inline align-[-0.15em]" />
     </a>
   );
 };
@@ -414,48 +417,236 @@ const HeaderIconButton: React.FC<{
 /** Minimum saved problems before insights are meaningful enough to show. */
 const INSIGHTS_MIN_PROBLEMS = 3;
 
+/** Strips the outer O(...) wrapper for compact "O(n²) vs O(n)" rendering. */
+function fmtBigO(c: string): string {
+  return (c || '').trim();
+}
+
+/** Human phrasing for the revisit reasons (gave-up dropped — overhaul). */
+const REVISIT_REASON_LABEL: Record<'may-be-suboptimal' | 'high-hints' | 'stale', string> = {
+  'may-be-suboptimal': 'may be suboptimal',
+  'high-hints': 'high hints',
+  'stale': 'stale',
+};
+
 /**
- * The insights ("weakest link" + revisit) panel — reads from computeInsights.
- * Hidden until there are enough problems to say anything trustworthy; once
- * shown, it labels the confidence level explicitly so the user knows how much
- * to trust the ranking.
+ * A small ⓘ info affordance with a REAL click-to-toggle popover. The honesty
+ * caveats (R7 — "the model owns judgments, the system owns facts") used to be
+ * persistent fine print, which cluttered the panel. They live here now — one
+ * click away — so the honesty is preserved but never shouts.
+ *
+ * Why a popover, not a native `title`: the browser `title` tooltip is
+ * unreliable (hover-only, slow, and suppressed on some setups — it showed
+ * nothing on a real review). This toggles an inline panel on click AND keyboard
+ * (Enter/Space), closes on outside-click / Escape, and exposes the text to
+ * assistive tech via aria. It renders the caveat INLINE (not an OS tooltip) so
+ * it's always visible when open.
+ */
+const InfoHint: React.FC<{ text: string; label?: string }> = ({ text, label = 'More info' }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onClick); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  return (
+    <span ref={ref} className="relative inline-flex align-middle">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        aria-label={label}
+        title={label}
+        className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full text-[10px] font-semibold leading-none text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 border border-neutral-300 dark:border-neutral-600 cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
+      >
+        i
+      </button>
+      {open && (
+        <span
+          role="tooltip"
+          className="absolute left-0 top-5 z-20 w-56 p-2 rounded-md bg-neutral-800 dark:bg-neutral-900 text-neutral-100 text-[10.5px] leading-snug shadow-lg border border-neutral-700"
+        >
+          {text}
+        </span>
+      )}
+    </span>
+  );
+};
+
+/** Shared card-title styling — bigger + higher-contrast than before (readable). */
+const CARD_TITLE = 'text-[13px] font-semibold text-neutral-800 dark:text-neutral-100';
+
+/**
+ * R1 — the "Am I improving?" trend card. A plain-language HEADLINE (the answer)
+ * + a one-line "because…" subline that explains what we mean in human terms, so
+ * the verdict is immediately interpretable (a bare arrow / "Holding steady" was
+ * not). No sparkline: a per-problem "struggle" bar chart has no honest axis (the
+ * y-value is an invented unitless composite), so it was decoration, not
+ * information — removed deliberately (design §2.2 / R1.3). The formal honesty
+ * caveat lives on the ⓘ popover. Degrades to "Not enough data yet" below the
+ * threshold (R1.2).
+ */
+const TrendCard: React.FC<{ trend: ProgressInsights['trend'] }> = ({ trend }) => {
+  const map = {
+    improving: {
+      icon: '📈', label: "You're improving", color: 'text-green-500',
+      why: "You're reaching for fewer hints and hitting better complexity than when you started.",
+    },
+    'needs-work': {
+      icon: '🎯', label: 'Pushing into harder territory', color: 'text-orange-500',
+      why: 'Your recent problems are leaning on more hints and effort — a sign you\'re taking on tougher challenges.',
+    },
+    flat: {
+      icon: '➖', label: 'About the same', color: 'text-blue-500',
+      why: 'Your recent problems look about as challenging as your earlier ones.',
+    },
+    insufficient: {
+      icon: '🌱', label: 'Not enough data yet', color: 'text-neutral-400',
+      why: "Save a few more problems and I'll start tracking whether you're improving.",
+    },
+  } as const;
+  const v = map[trend.direction];
+  return (
+    <div className="p-3 rounded-lg bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
+      <div className="flex items-center">
+        <span className={CARD_TITLE}>Am I improving?</span>
+        <InfoHint
+          label="What this is based on"
+          text="A practice signal drawn from how many hints you used and the complexity your solutions reached across your saved problems."
+        />
+      </div>
+      <div className="mt-1.5">
+        <span className={`text-[19px] font-bold ${v.color}`}>{v.icon} {v.label}</span>
+      </div>
+      <div className="text-[12px] text-neutral-600 dark:text-neutral-300 mt-1 leading-snug">{v.why}</div>
+      {trend.direction !== 'insufficient' && (
+        <div className="text-[11px] text-neutral-400 mt-1">Compared across your {trend.sampleSize} saved problems.</div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * R3 — "Room to optimize": a FLAG of candidates to review, NEVER a verdict
+ * (R3.1). Positively framed for the user ("room to optimize", "sharpen"); the ⓘ
+ * explains what it's based on. Hidden entirely when there are no flags (so an
+ * empty block never implies anything). The honesty requirement (R3.4/R3.5) is
+ * still met in the DESIGN + the data (the flag only fires on an unambiguous
+ * ≥1-class gap), but the surface copy stays encouraging rather than listing
+ * caveats about what the tool can't do (user's call — positive, objective copy).
+ */
+const ReviewCandidates: React.FC<{ flags: ProgressInsights['efficiencyFlags'] }> = ({ flags }) => {
+  if (flags.length === 0) return null;
+  return (
+    <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/30">
+      <div className="flex items-center">
+        <span className={CARD_TITLE}>Room to optimize</span>
+        <InfoHint
+          label="How these are flagged"
+          text="Solutions where the complexity you reached is a step above the optimal for that problem — handy candidates to revisit and sharpen."
+        />
+      </div>
+      <ul className="mt-1.5 space-y-1">
+        {flags.slice(0, 6).map(f => (
+          <li key={f.slug} className="text-[12px] text-neutral-700 dark:text-neutral-200 break-words">
+            • {f.title} <span className="text-neutral-500 dark:text-neutral-400">— {fmtBigO(f.achieved.time)} vs {fmtBigO(f.optimal.time)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+/** R5 — the compact at-a-glance dashboard strip (sits BELOW the core insights). */
+const DashboardStrip: React.FC<{ dashboard: ProgressInsights['dashboard']; totalProblems: number }> = ({ dashboard, totalProblems }) => {
+  const d = dashboard;
+  const lastActive = d.lastActiveAt > 0 ? timeAgo(d.lastActiveAt) : '—';
+  return (
+    <div className="p-3 rounded-lg bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
+      <div className={`${CARD_TITLE} mb-1.5`}>At a glance</div>
+      <div className="text-[12px] text-neutral-600 dark:text-neutral-300 space-y-1">
+        <div>
+          <span className="text-green-600 dark:text-green-400 font-medium">Easy {d.byDifficulty.Easy}</span>{' · '}
+          <span className="text-yellow-600 dark:text-yellow-400 font-medium">Medium {d.byDifficulty.Medium}</span>{' · '}
+          <span className="text-red-500 font-medium">Hard {d.byDifficulty.Hard}</span>
+        </div>
+        <div className="text-neutral-500 dark:text-neutral-400">{totalProblems} problems · {d.patternCoverage} patterns · active {d.activeDays} day{d.activeDays === 1 ? '' : 's'} · last {lastActive}</div>
+        {d.reviewedCandidates > 0 && (
+          <div className="text-neutral-500 dark:text-neutral-400">{d.reviewedCandidates} worth a second look (see above)</div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * The insights panel — reads from computeInsights. Hidden until there are enough
+ * problems to say anything trustworthy; once shown, four blocks answer the three
+ * user questions + a dashboard (design §1): trend (R1), weakest + strongest
+ * (R2), review candidates (R3), and the at-a-glance strip (R5). Honesty caveats
+ * live on ⓘ popovers (decluttered after visual-review passes); the standalone
+ * confidence badge was removed as unclear — the low-confidence gate still
+ * governs WHETHER weakest/strongest are surfaced (design §3.2 / R2.3).
  */
 const InsightsPanel: React.FC<{ insights: ProgressInsights }> = ({ insights }) => {
   if (insights.totalProblems < INSIGHTS_MIN_PROBLEMS) return null;
   const w = insights.weakestLink;
-  const confidence = !w ? 'Low' : w.lowConfidence ? 'Low' : w.problemCount >= 6 ? 'High' : 'Medium';
-  const confidenceColor =
-    confidence === 'High' ? 'text-green-500' : confidence === 'Medium' ? 'text-yellow-500' : 'text-neutral-400';
+  const s = insights.strongestLink;
   return (
-    <div className="mb-3 p-2.5 rounded-lg bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
-      <div className="flex items-center justify-between mb-1.5">
-        <div className="text-[12px] font-semibold">📊 Insights</div>
-        <span className={`text-[10px] font-medium ${confidenceColor}`} title="How much to trust the weakest-link ranking, based on how many problems it's computed from">
-          {confidence} confidence
-        </span>
+    <div className="mb-3 space-y-2.5">
+      <div className="flex items-center">
+        <div className="text-[15px] font-bold text-neutral-800 dark:text-neutral-100">📊 Insights</div>
       </div>
-      <div className="text-[11px] text-neutral-600 dark:text-neutral-300 space-y-1">
-        <div>{insights.totalProblems} problems tracked</div>
-        {w && (
-          <div>
-            <span className="font-medium">Weakest link:</span>{' '}
-            <span className="text-orange-500">{w.pattern}</span>{' '}
-            <span className="text-neutral-400">
-              (based on {w.problemCount} problem{w.problemCount === 1 ? '' : 's'}; avg {w.avgHintsUsed.toFixed(1)} hints)
-            </span>
-          </div>
-        )}
-        {insights.revisit.length > 0 && (
-          <div>
-            <span className="font-medium">Worth revisiting:</span>{' '}
-            {insights.revisit.slice(0, 5).map((r, i) => (
-              <span key={r.slug} className="text-neutral-500">
-                {i > 0 ? ', ' : ''}{r.title} <span className="text-neutral-400">({r.reason})</span>
-              </span>
-            ))}
-          </div>
-        )}
+
+      {/* R1 — trend */}
+      <TrendCard trend={insights.trend} />
+
+      {/* R2 — weakest + strongest */}
+      <div className="p-3 rounded-lg bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
+        <div className="flex items-center mb-1.5">
+          <span className={CARD_TITLE}>What to work on next</span>
+          <InfoHint
+            label="How this ranking works"
+            text="Ranked from your hints, problem difficulty, how close your solutions got to optimal, and how deep you went with the coaching tools."
+          />
+        </div>
+        <div className="text-[12.5px] space-y-1.5">
+          {w && (
+            <div>
+              <span className="text-neutral-500 dark:text-neutral-400">Weakest:</span>{' '}
+              <span className="text-orange-500 font-semibold">{w.pattern}</span>{' '}
+              <span className="text-neutral-400">({w.problemCount} problem{w.problemCount === 1 ? '' : 's'})</span>
+            </div>
+          )}
+          {s && (
+            <div>
+              <span className="text-neutral-500 dark:text-neutral-400">Strongest:</span>{' '}
+              <span className="text-green-500 font-semibold">{s.pattern}</span>{' '}
+              <span className="text-neutral-400">({s.problemCount} problem{s.problemCount === 1 ? '' : 's'})</span>
+            </div>
+          )}
+          {insights.revisit.length > 0 && (
+            <div className="pt-0.5 text-neutral-600 dark:text-neutral-300">
+              <span className="text-neutral-500 dark:text-neutral-400">Worth revisiting:</span>{' '}
+              {insights.revisit.slice(0, 5).map((r, i) => (
+                <span key={r.slug}>
+                  {i > 0 ? ', ' : ''}{r.title} <span className="text-neutral-400">({REVISIT_REASON_LABEL[r.reason]})</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* R3 — review candidates (hidden when none) */}
+      <ReviewCandidates flags={insights.efficiencyFlags} />
+
+      {/* R5 — compact dashboard strip (bottom, never buries R1–R3) */}
+      <DashboardStrip dashboard={insights.dashboard} totalProblems={insights.totalProblems} />
     </div>
   );
 };

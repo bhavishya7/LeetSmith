@@ -3,6 +3,8 @@ import type {
   Attempt,
   ProblemPattern,
   AttemptOutcome,
+  ActionType,
+  Complexity,
 } from '../types';
 import { PROBLEM_RECORD_SCHEMA_VERSION } from '../types';
 import { computeInsights } from './progress-analytics';
@@ -85,6 +87,17 @@ const maxTimestamp = () => Date.now() + 24 * 60 * 60 * 1000;
 
 const DIFFICULTIES: ReadonlyArray<ProblemRecord['difficulty']> = ['Easy', 'Medium', 'Hard'];
 const OUTCOMES: ReadonlyArray<AttemptOutcome> = ['solved', 'attempted', 'gave-up'];
+/**
+ * The full ActionType vocabulary (keep in sync with models.ts) — the allowlist
+ * for the v2 `Attempt.usedActions` field (R4b.3). Importing is untrusted input
+ * into privileged storage, so we accept ONLY these exact strings.
+ */
+const ACTION_TYPES: ReadonlyArray<ActionType> = [
+  'GET_HINT', 'GENERATE_EXAMPLES', 'BREAK_DOWN_PROBLEM', 'EXPLAIN_CONCEPT',
+  'CHECK_APPROACH', 'TIME_COMPLEXITY_HINT', 'PATTERN_RECOGNITION',
+  'UNDERSTAND_SOLUTION', 'GENERATE_REPORT',
+];
+const ACTION_TYPE_SET = new Set<string>(ACTION_TYPES);
 /** The full ProblemPattern vocabulary (keep in sync with models.ts). */
 const PATTERNS: ReadonlyArray<ProblemPattern> = [
   'Hash Map', 'Two Pointers', 'Sliding Window', 'Binary Search', 'BFS', 'DFS',
@@ -311,6 +324,43 @@ function sanitizeUrl(value: unknown, slug: string): string {
   return trimmed;
 }
 
+/**
+ * v2 — sanitizes the untrusted `usedActions` field to an allowlisted
+ * `ActionType[]` (R4b.2/R4b.3). Accepts ONLY an array; keeps only strings in the
+ * known ACTION_TYPES vocabulary; dedupes; caps to the vocabulary size (there are
+ * only 9 action types). Anything else ⇒ `[]` — the SAME safe default the
+ * storage-read migration uses for an old record (migrate() in
+ * progress-records.ts), so the two paths cannot diverge (R4b.4; pinned by a
+ * convergence test). Pure.
+ */
+export function sanitizeUsedActions(raw: unknown): ActionType[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ActionType[] = [];
+  for (const v of raw) {
+    if (typeof v === 'string' && ACTION_TYPE_SET.has(v) && !out.includes(v as ActionType)) {
+      out.push(v as ActionType);
+    }
+    if (out.length >= ACTION_TYPES.length) break; // can't exceed the vocabulary
+  }
+  return out;
+}
+
+/**
+ * v2 — sanitizes an untrusted complexity object to a Complexity, or null when it
+ * isn't a usable pair (R4b). Both time + space must be non-empty after
+ * neutralizing (same treatment as Attempt.complexity). Returns null — NOT a
+ * fabricated `O(?)` — so an absent/garbage optimal stays absent, which is what
+ * signals "no flag" downstream (R3.4). Pure.
+ */
+export function sanitizeComplexity(raw: unknown): Complexity | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const time = neutralizeString(readProp(o, 'time'), 100);
+  const space = neutralizeString(readProp(o, 'space'), 100);
+  if (!time || !space) return null;
+  return { time, space };
+}
+
 /** Reconstructs one Attempt from an untrusted entry, or null if unusable. */
 function sanitizeAttempt(raw: unknown): Attempt | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -339,9 +389,20 @@ function sanitizeAttempt(raw: unknown): Attempt | null {
       space: neutralizeString(readProp(co, 'space'), 100) || 'O(?)',
     },
     hintsUsed: sanitizeCount(readProp(o, 'hintsUsed'), 1000),
+    // v2 — the missed touch-point (R4b.1): copy + allowlist usedActions. Always
+    // set (default [] when absent/garbage), matching the migration default.
+    usedActions: sanitizeUsedActions(readProp(o, 'usedActions')),
   };
   const language = neutralizeString(readProp(o, 'language'), 100);
   if (language) attempt.language = language;
+  // v2 — optimalComplexity: set ONLY when present + valid; absent ⇒ no flag.
+  const optimal = sanitizeComplexity(readProp(o, 'optimalComplexity'));
+  if (optimal) attempt.optimalComplexity = optimal;
+  // v2 — chatCount: a bounded non-negative integer; set only when positive so
+  // an old record (absent) and an explicit 0 behave identically (parity with
+  // the storage read). Capped defensively like every imported count.
+  const chatCount = sanitizeCount(readProp(o, 'chatCount'), 10_000);
+  if (chatCount > 0) attempt.chatCount = chatCount;
   return attempt;
 }
 

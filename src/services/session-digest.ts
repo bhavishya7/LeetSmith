@@ -1,4 +1,4 @@
-import type { LearningContent, AnalyzeData, UnderstandData, ReportData, ProblemPattern, ProgressState, Complexity, Attempt } from '../types';
+import type { LearningContent, AnalyzeData, UnderstandData, ReportData, ProblemPattern, ProgressState, Complexity, Attempt, ActionType } from '../types';
 
 /**
  * Builds a compact, FACTUAL session digest from the structured data blocks that
@@ -190,6 +190,23 @@ export function buildRecordProjection(
   reportData: ReportData | null,
   reportMarkdown: string,
   language?: string,
+  /**
+   * v2 — the coaching actions the user reached for this session, projected from
+   * the live ProgressState.usedActions Set at the save call-site (App.tsx).
+   * Defaults to [] so an omitted arg is "none recorded" (never struggle).
+   */
+  usedActions: ActionType[] = [],
+  /**
+   * v2 — the canonical optimal from the B10 complexity pin at save time (design
+   * §4.1). Stored ON the attempt so the achieved-vs-optimal flag round-trips.
+   * null ⇒ no pin ⇒ the field is omitted (never fabricate — R3.4).
+   */
+  optimalComplexity: Complexity | null = null,
+  /**
+   * v2 — how many free-form chat questions the user asked this session (the
+   * `isUserQuery` count). A soft struggle signal; defaults to 0.
+   */
+  chatCount = 0,
 ): RecordProjection {
   const patterns = unionPatterns(reportData?.patterns ?? [], facts.patterns);
 
@@ -210,18 +227,27 @@ export function buildRecordProjection(
   const approachSummary =
     reportData?.approachSummary || facts.approachSummary || 'Approach not captured.';
 
-  return {
-    patterns,
-    attempt: {
-      date: Date.now(),
-      outcome: solved ? 'solved' : 'attempted',
-      approachSummary,
-      solutionSummary: reportMarkdown,
-      complexity,
-      hintsUsed: facts.hintsUsed,
-      language,
-    },
+  const attempt: Attempt = {
+    date: Date.now(),
+    outcome: solved ? 'solved' : 'attempted',
+    approachSummary,
+    solutionSummary: reportMarkdown,
+    complexity,
+    hintsUsed: facts.hintsUsed,
+    language,
+    // v2 — dedupe the live Set's projection defensively (it's already a Set, but
+    // the param is a plain array; keep the stored value clean).
+    usedActions: Array.from(new Set(usedActions)),
   };
+  // Only attach the pinned optimal when we actually have one — an absent field
+  // (not a fabricated O(?)) is what signals "no flag" downstream (R3.4).
+  if (optimalComplexity && optimalComplexity.time && optimalComplexity.space) {
+    attempt.optimalComplexity = { time: optimalComplexity.time, space: optimalComplexity.space };
+  }
+  // Only attach chatCount when positive (keep absent === 0 for old-record parity).
+  if (chatCount > 0) attempt.chatCount = Math.floor(chatCount);
+
+  return { patterns, attempt };
 }
 
 /** Union two pattern lists, preserving order, dropping duplicates. */
