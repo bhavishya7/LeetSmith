@@ -43,13 +43,54 @@ describe('slugFromUrl', () => {
 });
 
 describe('migrate', () => {
-  it('stamps schemaVersion 1 on a record that lacks one', () => {
+  it('brings a record that lacks a schemaVersion up to the current version', () => {
     const legacy = { slug: 'x', attempts: [] } as unknown as ProblemRecord;
-    expect(migrate(legacy).schemaVersion).toBe(1);
+    expect(migrate(legacy).schemaVersion).toBe(PROBLEM_RECORD_SCHEMA_VERSION);
   });
   it('leaves a current-version record unchanged (idempotent)', () => {
-    const current = { slug: 'x', schemaVersion: PROBLEM_RECORD_SCHEMA_VERSION, attempts: [] } as unknown as ProblemRecord;
+    const current = {
+      slug: 'x', schemaVersion: PROBLEM_RECORD_SCHEMA_VERSION, attempts: [],
+    } as unknown as ProblemRecord;
     expect(migrate(current)).toEqual(current);
+  });
+
+  // v1 → v2 (progress-insights-overhaul): two new per-Attempt fields.
+  describe('v1 → v2', () => {
+    it('defaults an old v1 attempt usedActions to [] and leaves optimalComplexity absent', () => {
+      const v1 = {
+        slug: 'two-sum', schemaVersion: 1,
+        attempts: [attempt('solved')], // no usedActions / optimalComplexity
+      } as unknown as ProblemRecord;
+      const migrated = migrate(v1);
+      expect(migrated.schemaVersion).toBe(2);
+      expect(migrated.attempts[0].usedActions).toEqual([]);
+      expect('optimalComplexity' in migrated.attempts[0]).toBe(false);
+    });
+
+    it('does NOT mis-score / fabricate: the old attempt is "none recorded", not a struggle signal', () => {
+      const v1 = {
+        slug: 'two-sum', schemaVersion: 1, attempts: [attempt('solved', { hintsUsed: 0 })],
+      } as unknown as ProblemRecord;
+      const a = migrate(v1).attempts[0];
+      expect(a.usedActions).toEqual([]);              // empty ⇒ zero tool-depth downstream
+      expect(a.optimalComplexity).toBeUndefined();    // absent ⇒ never flagged suboptimal
+    });
+
+    it('preserves an attempt that already has usedActions (no clobber)', () => {
+      const v1 = {
+        slug: 'two-sum', schemaVersion: 1,
+        attempts: [attempt('solved', { usedActions: ['GET_HINT'] })],
+      } as unknown as ProblemRecord;
+      expect(migrate(v1).attempts[0].usedActions).toEqual(['GET_HINT']);
+    });
+
+    it('is idempotent on a v2 record (second migrate is a no-op)', () => {
+      const v1 = {
+        slug: 'two-sum', schemaVersion: 1, attempts: [attempt('solved')],
+      } as unknown as ProblemRecord;
+      const once = migrate(v1);
+      expect(migrate(once)).toEqual(once);
+    });
   });
 });
 
