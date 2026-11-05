@@ -23,7 +23,7 @@ ends "…popping them off the moment" and then nothing — with **no error shown
 card looks complete but isn't. Observed repeatedly 2026-11-01 across several
 problems, most on `UNDERSTAND_SOLUTION` and `CHECK_APPROACH`. Intermittent (depends
 on network timing), which is the tell that it's a streaming/boundary issue, not a
-model issue.
+model issue
 
 **There are TWO independent root causes producing the same symptom**, plus a third
 lower-confidence contributor. They are separable; fix B28 and B29, consider the
